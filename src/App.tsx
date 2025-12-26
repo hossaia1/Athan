@@ -23,8 +23,8 @@ type DailyWeather = {
 };
 
 type HourWeather = {
-  time: string; // ISO like "2025-12-25T14:00"
-  hour: string; // "14:00"
+  time: string; // ISO
+  hour: string; // HH:MM
   temp: number;
   code: number;
 };
@@ -138,10 +138,8 @@ async function fetchWeather(): Promise<{
   const hourlyTemps: number[] = json.hourly.temperature_2m;
   const hourlyCodes: number[] = json.hourly.weathercode;
 
-  // Use local date (Helsinki timezone in API already), build YYYY-MM-DD from local Date
   const localToday = new Date();
-  const todayDate =
-    `${localToday.getFullYear()}-${pad(localToday.getMonth() + 1)}-${pad(localToday.getDate())}`;
+  const todayDate = `${localToday.getFullYear()}-${pad(localToday.getMonth() + 1)}-${pad(localToday.getDate())}`;
 
   const todayHours: HourWeather[] = hourlyTimes
     .map((t: string, i: number) => ({
@@ -160,6 +158,8 @@ async function fetchWeather(): Promise<{
 ===================== */
 
 export default function App() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
   const [now, setNow] = useState(new Date());
 
   const [theme, setTheme] = useState<"dark" | "light">(
@@ -180,6 +180,9 @@ export default function App() {
 
   const [quoteIndex, setQuoteIndex] = useState(0);
 
+  const [showMore, setShowMore] = useState(false);
+  const [compact, setCompact] = useState(false);
+
   const [adhanEnabled, setAdhanEnabled] = useState<Record<PrayerKey, boolean>>(
     () =>
       JSON.parse(
@@ -194,17 +197,11 @@ export default function App() {
       )
   );
 
-  // Prevent repeated autoplay within the same prayer minute
   const lastPlayedRef = useRef<PrayerKey | null>(null);
-
-  // Audio instance (created once)
   const adhan = useMemo(() => new Audio(adhanAudio), []);
 
-  // Adhaan playback state
   const [isAdhanPlaying, setIsAdhanPlaying] = useState(false);
   const [isAdhanPaused, setIsAdhanPaused] = useState(false);
-
-  // If user "stops completely", we lock playback until page reload
   const [adhanLocked, setAdhanLocked] = useState(false);
 
   /* Clock */
@@ -213,7 +210,7 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  /* Quote rotation (45s) */
+  /* Quote rotation */
   useEffect(() => {
     const t = setInterval(() => {
       setQuoteIndex((i) => (i + 1) % QUOTES.length);
@@ -240,15 +237,37 @@ export default function App() {
     });
   }, []);
 
-  /* Keep UI state in sync with audio element */
+  /* ResizeObserver → decide compact mode (handles zoom + tablets) */
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+
+    const ro = new ResizeObserver(() => {
+      const { width, height } = el.getBoundingClientRect();
+
+      // Heuristic:
+      // If the app area is too small to comfortably show 2×2 with details, go compact.
+      // Tune these numbers if you want.
+      const tooNarrow = width < 980;
+      const tooShort = height < 600;
+
+      setCompact(tooNarrow || tooShort);
+
+      // If we leave compact, also close the overlay
+      if (!(tooNarrow || tooShort)) setShowMore(false);
+    });
+
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /* Audio state sync */
   useEffect(() => {
     const onPlay = () => {
       setIsAdhanPlaying(true);
       setIsAdhanPaused(false);
     };
-    const onPause = () => {
-      setIsAdhanPaused(true);
-    };
+    const onPause = () => setIsAdhanPaused(true);
     const onEnded = () => {
       setIsAdhanPlaying(false);
       setIsAdhanPaused(false);
@@ -278,14 +297,9 @@ export default function App() {
 
   const nextMin = hhmmToMinutes(prayerTimes[nextPrayer]);
   const diff = nextMin > nowMin ? nextMin - nowMin : 1440 - nowMin + nextMin;
+  const countdown = `${pad(Math.floor(diff / 60))}:${pad(diff % 60)}:${pad(59 - now.getSeconds())}`;
 
-  const countdown = `${pad(Math.floor(diff / 60))}:${pad(diff % 60)}:${pad(
-    59 - now.getSeconds()
-  )}`;
-
-  /* =====================
-     ADHAAN AUTO-PLAY
-  ===================== */
+  /* Auto-play */
   useEffect(() => {
     if (adhanLocked) return;
     if (!adhanEnabled[currentPrayer]) return;
@@ -298,12 +312,9 @@ export default function App() {
       adhan.play().catch(() => {});
       lastPlayedRef.current = currentPrayer;
     }
-  }, [now, currentPrayer, adhanEnabled, prayerTimes, adhan, adhanLocked, nowMin]);
+  }, [now, currentPrayer, adhanEnabled, prayerTimes, adhanLocked, nowMin, adhan]);
 
-  /* =====================
-     Adhaan controls
-  ===================== */
-
+  /* Adhaan controls */
   const pauseAdhan = () => {
     if (adhanLocked) return;
     if (!isAdhanPlaying) return;
@@ -318,7 +329,6 @@ export default function App() {
     adhan.play().catch(() => {});
   };
 
-  // "Stop completely": stop now AND prevent any further play until reload
   const stopAdhanCompletely = () => {
     adhan.pause();
     adhan.currentTime = 0;
@@ -327,32 +337,99 @@ export default function App() {
     setAdhanLocked(true);
   };
 
-  /* =====================
-     Weather selection helpers for Lenovo 10"
-     - show compact "next 10 hours"
-     - keep week row small but readable
-  ===================== */
-
+  /* Weather slices */
   const nextHours = useMemo(() => {
-    // find the "current hour" entry in todayHours, then take next 10
     const curHour = pad(now.getHours()) + ":00";
-    const startIdx = Math.max(
-      0,
-      todayHours.findIndex((h) => h.hour === curHour)
-    );
-    return todayHours.slice(startIdx === -1 ? 0 : startIdx, (startIdx === -1 ? 0 : startIdx) + 10);
+    const idx = todayHours.findIndex((h) => h.hour === curHour);
+    const start = idx === -1 ? 0 : idx;
+    return todayHours.slice(start, start + 10);
   }, [todayHours, now]);
 
+  /* UI building blocks */
+  const Card = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => (
+    <div className={`rounded-3xl bg-white/10 p-6 overflow-hidden ${className}`}>{children}</div>
+  );
+
+  const appBg =
+    theme === "dark" ? "bg-[#070b12] text-white" : "bg-gray-100 text-gray-900";
+
   return (
-    <div
-      className={`h-full p-6 ${
-        theme === "dark" ? "bg-[#070b12] text-white" : "bg-gray-100 text-gray-900"
-      }`}
-    >
-      <div className="grid h-full grid-cols-2 grid-rows-2 gap-6">
+    <div ref={rootRef} className={`min-h-screen w-full p-6 ${appBg}`}>
+      {/* Compact-mode floating "more" button */}
+      {compact && (
+        <button
+          onClick={() => setShowMore(true)}
+          className="fixed bottom-4 right-4 z-40 rounded-full bg-white/10 px-4 py-3 text-sm backdrop-blur"
+          title="More"
+        >
+          ⋯
+        </button>
+      )}
+
+      {/* More overlay (only in compact) */}
+      {compact && showMore && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm">
+          <div className="absolute inset-4 rounded-3xl bg-[#0b1020] text-white p-4 overflow-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-sm opacity-80">More</div>
+              <button
+                onClick={() => setShowMore(false)}
+                className="rounded-full bg-white/10 px-3 py-1 text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Hidden content goes here */}
+            <div className="grid gap-4">
+              <Card>
+                <div className="text-xs opacity-70 mb-2">Today (next hours)</div>
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {nextHours.map((h) => (
+                    <div
+                      key={h.time}
+                      className="min-w-[62px] rounded-2xl bg-black/30 px-3 py-2 text-center"
+                    >
+                      <div className="text-[11px] opacity-70">{h.hour}</div>
+                      <div className="text-lg leading-none">{weatherEmoji(h.code)}</div>
+                      <div className="text-[12px] font-mono">{Math.round(h.temp)}°</div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+
+              <Card>
+                <div className="text-xs opacity-70 mb-2">Next 7 days</div>
+                <div className="grid grid-cols-7 gap-2 text-sm">
+                  {week.slice(0, 7).map((d) => (
+                    <div key={d.day} className="text-center opacity-90">
+                      <div className="text-[11px] opacity-70">
+                        {new Date(d.day).toLocaleDateString("en-GB", { weekday: "short" })}
+                      </div>
+                      <div className="text-lg leading-none">{weatherEmoji(d.code)}</div>
+                      <div className="text-[12px] font-mono">{Math.round(d.max)}°</div>
+                      <div className="text-[11px] opacity-50 font-mono">{Math.round(d.min)}°</div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+
+              <Card>
+                <div className="text-lg leading-relaxed">“{QUOTES[quoteIndex].text}”</div>
+                <div className="mt-4 opacity-70">{QUOTES[quoteIndex].ref}</div>
+              </Card>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Layout:
+          - In normal mode: true 2×2 dashboard
+          - In compact mode: still 2×2 skeleton, but heavy content hidden (no overlap)
+      */}
+      <div className="grid gap-6 grid-cols-2 grid-rows-2">
         {/* TIME */}
-        <div className="relative rounded-3xl bg-white/10 p-6">
-          {/* corner controls */}
+        <Card className="relative">
           <div className="absolute right-4 top-4 flex items-center gap-2">
             <button
               onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -366,6 +443,7 @@ export default function App() {
           <div className="text-7xl font-semibold">
             {pad(now.getHours())}:{pad(now.getMinutes())}:{pad(now.getSeconds())}
           </div>
+
           <div className="opacity-70 mt-2">
             {now.toLocaleDateString("en-GB", {
               weekday: "long",
@@ -382,7 +460,6 @@ export default function App() {
             Next: {nextPrayer} in <b>{countdown}</b>
           </div>
 
-          {/* Adhaan now playing controls */}
           <div className="mt-5">
             {adhanLocked ? (
               <div className="text-xs opacity-70">🔇 Adhaan disabled (reload page to re-enable)</div>
@@ -391,17 +468,11 @@ export default function App() {
                 <div className="text-sm">🎧 Adhaan is {isAdhanPaused ? "paused" : "playing"}…</div>
 
                 {!isAdhanPaused ? (
-                  <button
-                    onClick={pauseAdhan}
-                    className="rounded-xl bg-white/10 px-3 py-2 text-xs"
-                  >
+                  <button onClick={pauseAdhan} className="rounded-xl bg-white/10 px-3 py-2 text-xs">
                     ⏸ Pause
                   </button>
                 ) : (
-                  <button
-                    onClick={resumeAdhan}
-                    className="rounded-xl bg-white/10 px-3 py-2 text-xs"
-                  >
+                  <button onClick={resumeAdhan} className="rounded-xl bg-white/10 px-3 py-2 text-xs">
                     ▶ Resume
                   </button>
                 )}
@@ -409,22 +480,20 @@ export default function App() {
                 <button
                   onClick={stopAdhanCompletely}
                   className="rounded-xl bg-red-500/20 px-3 py-2 text-xs text-red-300"
-                  title="Stops and disables further adhaan until reload"
                 >
                   ⛔ Stop completely
                 </button>
               </div>
             ) : (
-              <div className="text-xs opacity-0">🔊 Adhaan will play on enabled prayers.</div>
+              <div className="text-xs opacity-70">🔊 Adhaan will play on enabled prayers.</div>
             )}
           </div>
-        </div>
+        </Card>
 
         {/* WEATHER */}
-        <div className="rounded-3xl bg-white/10 p-6">
+        <Card>
           {weather && (
             <>
-              {/* Current */}
               <div className="text-6xl font-semibold">
                 {weatherEmoji(weather.code)} {Math.round(weather.temp)}°C
               </div>
@@ -432,45 +501,55 @@ export default function App() {
                 💨 {weather.wind} m/s ({degToCardinal(weather.direction)})
               </div>
 
-              {/* Today (next hours) */}
-              <div className="mt-5">
-                <div className="text-xs opacity-70 mb-2">Today (next hours)</div>
-                <div className="flex gap-2 overflow-x-auto pb-1">
-                  {nextHours.map((h) => (
-                    <div
-                      key={h.time}
-                      className="min-w-[62px] rounded-2xl bg-black/20 px-3 py-2 text-center"
-                    >
-                      <div className="text-[11px] opacity-70">{h.hour}</div>
-                      <div className="text-lg leading-none">{weatherEmoji(h.code)}</div>
-                      <div className="text-[12px] font-mono">{Math.round(h.temp)}°</div>
+              {/* Only show detailed sections when NOT compact */}
+              {!compact && (
+                <>
+                  <div className="mt-5">
+                    <div className="text-xs opacity-70 mb-2">Today (next hours)</div>
+                    <div className="flex gap-2 overflow-x-auto pb-1">
+                      {nextHours.map((h) => (
+                        <div
+                          key={h.time}
+                          className="min-w-[62px] rounded-2xl bg-black/20 px-3 py-2 text-center"
+                        >
+                          <div className="text-[11px] opacity-70">{h.hour}</div>
+                          <div className="text-lg leading-none">{weatherEmoji(h.code)}</div>
+                          <div className="text-[12px] font-mono">{Math.round(h.temp)}°</div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </div>
+                  </div>
 
-              {/* Week */}
-              <div className="mt-6">
-                <div className="text-xs opacity-70 mb-2">Next 7 days</div>
-                <div className="grid grid-cols-7 gap-2 text-sm">
-                  {week.slice(0, 7).map((d) => (
-                    <div key={d.day} className="text-center opacity-90">
-                      <div className="text-[11px] opacity-70">
-                        {new Date(d.day).toLocaleDateString("en-GB", { weekday: "short" })}
-                      </div>
-                      <div className="text-lg leading-none">{weatherEmoji(d.code)}</div>
-                      <div className="text-[12px] font-mono">{Math.round(d.max)}°</div>
-                      <div className="text-[11px] opacity-50 font-mono">{Math.round(d.min)}°</div>
+                  <div className="mt-6">
+                    <div className="text-xs opacity-70 mb-2">Next 7 days</div>
+                    <div className="grid grid-cols-7 gap-2 text-sm">
+                      {week.slice(0, 7).map((d) => (
+                        <div key={d.day} className="text-center opacity-90">
+                          <div className="text-[11px] opacity-70">
+                            {new Date(d.day).toLocaleDateString("en-GB", { weekday: "short" })}
+                          </div>
+                          <div className="text-lg leading-none">{weatherEmoji(d.code)}</div>
+                          <div className="text-[12px] font-mono">{Math.round(d.max)}°</div>
+                          <div className="text-[11px] opacity-50 font-mono">{Math.round(d.min)}°</div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  </div>
+                </>
+              )}
+
+              {/* In compact mode, hint that more exists */}
+              {compact && (
+                <div className="mt-4 text-xs opacity-70">
+                  More weather details in ⋯
                 </div>
-              </div>
+              )}
             </>
           )}
-        </div>
+        </Card>
 
         {/* PRAYERS */}
-        <div className="rounded-3xl bg-white/10 p-6">
+        <Card>
           <table className="w-full text-sm">
             <tbody>
               {PRAYERS.map((p) => (
@@ -500,14 +579,23 @@ export default function App() {
             </tbody>
           </table>
 
-          <div className="mt-3 text-xs opacity-70">Tip: enable only the prayers you want audible.</div>
-        </div>
+          <div className="mt-3 text-xs opacity-70">
+            Tip: enable only the prayers you want audible.
+          </div>
+        </Card>
 
         {/* QUOTE */}
-        <div className="rounded-3xl bg-white/10 p-6 flex flex-col justify-center">
-          <div className="text-lg leading-relaxed">“{QUOTES[quoteIndex].text}”</div>
-          <div className="mt-4 opacity-70">{QUOTES[quoteIndex].ref}</div>
-        </div>
+        <Card>
+          {/* Hide quote in compact, show in overlay */}
+          {!compact ? (
+            <>
+              <div className="text-lg leading-relaxed">“{QUOTES[quoteIndex].text}”</div>
+              <div className="mt-4 opacity-70">{QUOTES[quoteIndex].ref}</div>
+            </>
+          ) : (
+            <div className="text-xs opacity-70">Quotes available in ⋯</div>
+          )}
+        </Card>
       </div>
     </div>
   );
