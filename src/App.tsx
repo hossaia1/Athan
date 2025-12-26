@@ -485,7 +485,7 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              <div className="text-xs opacity-70">🔊 Adhaan will play on enabled prayers.</div>
+              <div className="text-xs opacity-0">🔊 Adhaan will play on enabled prayers.</div>
             )}
           </div>
         </Card>
